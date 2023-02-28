@@ -2,6 +2,20 @@ import time
 from metaflow import FlowSpec, step, resources, parallel_map, Parameter
 
 
+def load_libc():
+    from ctypes.util import find_library
+    from ctypes import cdll
+    import ctypes
+
+    libc = cdll.LoadLibrary(find_library("c"))
+    libc.malloc.argtypes = [ctypes.c_size_t]
+    libc.malloc.restype = ctypes.c_void_p
+    libc.free.argtypes = [ctypes.c_void_p]
+    libc.memset.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
+    libc.memset.restype = ctypes.c_void_p
+    return libc
+
+
 def spin_cpu(secs, half_load=False):
     nu = time.time()
     x = 0
@@ -91,6 +105,7 @@ class MonitorBench(FlowSpec):
             self.mem_flat_2gb,
             self.mem_flat_8gb,
             self.mem_staircase_8gb,
+            self.mem_increasing_rss,
             self.mem_spike_2gb,
         )
 
@@ -129,16 +144,31 @@ class MonitorBench(FlowSpec):
 
     @resources(memory=3000)
     @step
-    def mem_spike_2gb(self):
+    def mem_increasing_rss(self):
         """
-        Spike a 2GB allocation for 10 seconds
+        Make a 2GB allocation and fill it
         """
         import mmap
 
-        time.sleep(self.spin_secs / 2)
         m = mmap.mmap(-1, 2_000_000_000, flags=mmap.MAP_PRIVATE)
+        for i in range(2_000_000_000):
+            m[i] = 66
         time.sleep(10)
         m.close()
+        self.next(self.mem_join)
+
+    @resources(memory=3000)
+    @step
+    def mem_spike_2gb(self):
+        """
+        Spike a 2GB allocation for 10secs
+        """
+        time.sleep(self.spin_secs / 2)
+        c = load_libc()
+        p = c.malloc(2_000_000_000)
+        c.memset(p, 66, 2_000_000_000)
+        time.sleep(10)
+        c.free(p)
         time.sleep(self.spin_secs / 2)
         self.next(self.mem_join)
 
