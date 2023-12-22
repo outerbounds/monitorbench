@@ -78,7 +78,7 @@ class MonitorBench(FlowSpec):
         parallel_map(lambda _: spin_cpu(self.spin_secs), [None] * 2)
         self.next(self.cpu_join)
 
-    @resources(cpu=2)
+    @resources(cpu=1)
     @step
     def cpu_1cores_halfload(self):
         """
