@@ -57,7 +57,7 @@ def _print_mem():
 @pypi_base(python="3.11.0", packages={"psutil": "5.9.7"})
 class MonitorBench(FlowSpec):
     spin_secs = Parameter(
-        "step_time", help="Run each step for this many seconds", default=300
+        "step_time", help="Run each step for this many seconds", default=600
     )
 
     @step
