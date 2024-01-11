@@ -46,7 +46,7 @@ def _print_mem():
 @pypi_base(python="3.11.0", packages={"psutil": "5.9.7"})
 class MonitorBench(FlowSpec):
     spin_secs = Parameter(
-        "step_time", help="Run each step for this many seconds", default=120
+        "step_time", help="Run each step for this many seconds", default=600
     )
 
     @step
@@ -58,6 +58,8 @@ class MonitorBench(FlowSpec):
             self.cpu_2cores_halfload,
             self.cpu_8cores,
             self.cpu_8cores_underprovisioned,
+            self.cpu_unspecified,
+            self.cpu_fraction,
         )
 
     @resources(cpu=1)
@@ -112,6 +114,23 @@ class MonitorBench(FlowSpec):
         Eight cores, each 100% utilized, but only 4 cores requested
         """
         parallel_map(lambda _: spin_cpu(self.spin_secs), [None] * 8)
+        self.next(self.cpu_join)
+
+    @step
+    def cpu_unspecified(self):
+        """
+        Unspecified CPU resources.  Expected to be Metaflow default
+        """
+        spin_cpu(self.spin_secs, half_load=False)
+        self.next(self.cpu_join)
+
+    @resources(cpu=0.5)
+    @step
+    def cpu_fraction(self):
+        """
+        Fractional CPU resources requested.  Expected to be Metaflow default
+        """
+        spin_cpu(self.spin_secs, half_load=True)
         self.next(self.cpu_join)
 
     @step
@@ -286,6 +305,8 @@ class MonitorBench(FlowSpec):
                 _make_file(tmp.name, num_gigs * 1000)
             spin_cpu(self.spin_secs / 10)
         self.next(self.io_join)
+
+
 
     @step
     def io_join(self, inputs):
