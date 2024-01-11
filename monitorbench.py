@@ -128,7 +128,7 @@ class MonitorBench(FlowSpec):
     @step
     def cpu_fraction(self):
         """
-        Fractional CPU resources requested.
+        Fractional CPU resources requested.  Expected to be Metaflow default
         """
         spin_cpu(self.spin_secs, half_load=True)
         self.next(self.cpu_join)
