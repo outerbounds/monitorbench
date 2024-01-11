@@ -153,7 +153,7 @@ class MonitorBench(FlowSpec):
         Increase CPU utilization in steps of 10%, ending at 100% utilization
         """
         for i in range(10):
-            spin_cpu_percentage(self.spin_secs/10, i*10)
+            spin_cpu_percentage(int(self.spin_secs/10), i*10)
         self.next(self.cpu_join)
 
     @step
