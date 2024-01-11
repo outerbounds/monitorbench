@@ -1,5 +1,4 @@
-import time
-import mmap
+import time, mmap, math
 from tempfile import NamedTemporaryFile
 
 from metaflow import FlowSpec, step, resources, parallel_map, Parameter, pypi_base
@@ -27,6 +26,18 @@ def spin_cpu(secs, half_load=False):
         if half_load:
             time.sleep(0.0000002)
 
+def spin_cpu_percentage(seconds, percentage=100):
+    for i in range(0, seconds):
+        start_time = time.time()
+        if i % 10 == 0:
+            print(f"Beginning work cycle {i}/{seconds}")
+        # Perform work for the required percentage of this second
+        while (time.time() - start_time) < (percentage / 100.0):
+            a = math.sqrt(64 * 64 * 64 * 64 * 64)
+        # Sleep for the remainder of the second
+        time.sleep(1 - percentage / 100.0)
+        
+
 
 def _make_file(name, size_in_mb):
     x = b"1" * 1_000_000
@@ -46,7 +57,7 @@ def _print_mem():
 @pypi_base(python="3.11.0", packages={"psutil": "5.9.7"})
 class MonitorBench(FlowSpec):
     spin_secs = Parameter(
-        "step_time", help="Run each step for this many seconds", default=600
+        "step_time", help="Run each step for this many seconds", default=300
     )
 
     @step
@@ -60,6 +71,7 @@ class MonitorBench(FlowSpec):
             self.cpu_8cores_underprovisioned,
             self.cpu_unspecified,
             self.cpu_fraction,
+            self.cpu_staircase,
         )
 
     @resources(cpu=1)
@@ -132,6 +144,16 @@ class MonitorBench(FlowSpec):
         Fractional CPU resources requested.  Expected to be Metaflow default
         """
         spin_cpu(self.spin_secs, half_load=True)
+        self.next(self.cpu_join)
+
+    @resources(cpu=1)
+    @step
+    def cpu_staircase(self):
+        """
+        Increase CPU utilization in steps of 10%, ending at 100% utilization
+        """
+        for i in range(10):
+            self.spin_cpu_percentage(self.spin_secs/10, i*10)
         self.next(self.cpu_join)
 
     @step
