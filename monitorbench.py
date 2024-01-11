@@ -119,7 +119,8 @@ class MonitorBench(FlowSpec):
     @step
     def cpu_unspecified(self):
         """
-        Unspecified CPU resources.  Expected to be Metaflow default
+        Unspecified CPU resources.  Expected to be Metaflow default.
+        Also allocates the Metaflow default amount of memory for this step.
         """
         spin_cpu(self.spin_secs, half_load=False)
         self.next(self.cpu_join)
@@ -305,8 +306,6 @@ class MonitorBench(FlowSpec):
                 _make_file(tmp.name, num_gigs * 1000)
             spin_cpu(self.spin_secs / 10)
         self.next(self.io_join)
-
-
 
     @step
     def io_join(self, inputs):
