@@ -27,10 +27,11 @@ def spin_cpu(secs, half_load=False):
             time.sleep(0.0000002)
 
 def spin_cpu_percentage(seconds, percentage=100):
+    print(f"Running at {percentage}% CPU Utilization for {seconds} seconds...")
     for i in range(0, seconds):
         start_time = time.time()
         if i % 10 == 0:
-            print(f"Beginning work cycle {i}/{seconds}")
+            print(f"Beginning work cycle {i}/{seconds} seconds...")
         # Perform work for the required percentage of this second
         while (time.time() - start_time) < (percentage / 100.0):
             a = math.sqrt(64 * 64 * 64 * 64 * 64)
