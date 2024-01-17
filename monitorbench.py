@@ -319,7 +319,7 @@ class MonitorBench(FlowSpec):
             num_gigs = 8
             with NamedTemporaryFile() as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
-            spin_cpu_percentage(self.spin_secs / 10)
+            spin_cpu_percentage(int(self.spin_secs / 10))
         self.next(self.io_join)
 
     @step
