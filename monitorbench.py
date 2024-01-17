@@ -18,14 +18,6 @@ def load_libc():
     return libc
 
 
-def spin_cpu(secs, half_load=False):
-    nu = time.time()
-    x = 0
-    while time.time() - nu < secs:
-        x += 1
-        if half_load:
-            time.sleep(0.0000002)
-
 def spin_cpu_percentage(seconds, percentage=100):
     print(f"Running at {percentage}% CPU Utilization for {seconds} seconds...")
     for i in range(0, seconds):
@@ -81,7 +73,7 @@ class MonitorBench(FlowSpec):
         """
         One core, 100% utilized
         """
-        spin_cpu(self.spin_secs, half_load=False)
+        spin_cpu_percentage(self.spin_secs)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
@@ -90,7 +82,7 @@ class MonitorBench(FlowSpec):
         """
         Two cores, each 100% utilized
         """
-        parallel_map(lambda _: spin_cpu(self.spin_secs), [None] * 2)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 2)
         self.next(self.cpu_join)
 
     @resources(cpu=1)
@@ -99,7 +91,7 @@ class MonitorBench(FlowSpec):
         """
         One core, 50% utilized
         """
-        spin_cpu(self.spin_secs, half_load=True)
+        spin_cpu_percentage(self.spin_secs, percentage=50)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
@@ -108,7 +100,7 @@ class MonitorBench(FlowSpec):
         """
         Two cores, each 50% utilized
         """
-        parallel_map(lambda _: spin_cpu(self.spin_secs, half_load=True), [None] * 2)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs, percentage=50), [None] * 2)
         self.next(self.cpu_join)
 
     @resources(cpu=8)
@@ -117,7 +109,7 @@ class MonitorBench(FlowSpec):
         """
         Eight cores, each 100% utilized
         """
-        parallel_map(lambda _: spin_cpu(self.spin_secs), [None] * 8)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 8)
         self.next(self.cpu_join)
 
     @resources(cpu=4)
@@ -126,7 +118,7 @@ class MonitorBench(FlowSpec):
         """
         Eight cores, each 100% utilized, but only 4 cores requested
         """
-        parallel_map(lambda _: spin_cpu(self.spin_secs), [None] * 8)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 8)
         self.next(self.cpu_join)
 
     @step
@@ -135,7 +127,7 @@ class MonitorBench(FlowSpec):
         Unspecified CPU resources.  Expected to be Metaflow default.
         Also allocates the Metaflow default amount of memory for this step.
         """
-        spin_cpu(self.spin_secs, half_load=False)
+        spin_cpu_percentage(self.spin_secs)
         self.next(self.cpu_join)
 
     @resources(cpu=0.5)
@@ -144,7 +136,7 @@ class MonitorBench(FlowSpec):
         """
         Fractional CPU resources requested.  Expected to be Metaflow default
         """
-        spin_cpu(self.spin_secs, half_load=True)
+        spin_cpu_percentage(self.spin_secs, percentage=50)
         self.next(self.cpu_join)
 
     @resources(cpu=1)
@@ -327,7 +319,7 @@ class MonitorBench(FlowSpec):
             num_gigs = 8
             with NamedTemporaryFile() as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
-            spin_cpu(self.spin_secs / 10)
+            spin_cpu_percentage(self.spin_secs / 10)
         self.next(self.io_join)
 
     @step
