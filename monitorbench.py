@@ -19,6 +19,11 @@ def load_libc():
 
 
 def spin_cpu_percentage(seconds, percentage=100):
+    """
+    Utilize the CPU for the desired number of seconds at the desired percentage.
+    Number of seconds is truncated to the nearest integer.
+    """
+    seconds = int(seconds)
     print(f"Running at {percentage}% CPU Utilization for {seconds} seconds...")
     for i in range(0, seconds):
         start_time = time.time()
@@ -146,7 +151,7 @@ class MonitorBench(FlowSpec):
         Increase CPU utilization in steps of 10%, ending at 100% utilization
         """
         for i in range(10):
-            spin_cpu_percentage(int(self.spin_secs/10), i*10)
+            spin_cpu_percentage(self.spin_secs/10, i*10)
         self.next(self.cpu_join)
 
     @step
@@ -319,7 +324,7 @@ class MonitorBench(FlowSpec):
             num_gigs = 8
             with NamedTemporaryFile() as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
-            spin_cpu_percentage(int(self.spin_secs / 10))
+            spin_cpu_percentage(self.spin_secs / 10)
         self.next(self.io_join)
 
     @step
