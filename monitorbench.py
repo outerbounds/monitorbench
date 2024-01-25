@@ -1,7 +1,16 @@
 import time, mmap, math
 from tempfile import NamedTemporaryFile
 
-from metaflow import FlowSpec, step, resources, parallel_map, Parameter, pypi_base
+from metaflow import (
+    FlowSpec,
+    step,
+    resources,
+    parallel_map,
+    Parameter,
+    pypi_base,
+    catch,
+    retry
+)
 
 
 def load_libc():
@@ -34,7 +43,6 @@ def spin_cpu_percentage(seconds, percentage=100):
             a = math.sqrt(64 * 64 * 64 * 64 * 64)
         # Sleep for the remainder of the second
         time.sleep(1 - percentage / 100.0)
-        
 
 
 def _make_file(name, size_in_mb):
@@ -57,6 +65,7 @@ class MonitorBench(FlowSpec):
     spin_secs = Parameter(
         "step_time", help="Run each step for this many seconds", default=600
     )
+    enable_oom = Parameter("enable_oom", is_flag=True, help="Set this flag to enable an OOM test", default=False)
 
     @step
     def start(self):
@@ -105,7 +114,9 @@ class MonitorBench(FlowSpec):
         """
         Two cores, each 50% utilized
         """
-        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs, percentage=50), [None] * 2)
+        parallel_map(
+            lambda _: spin_cpu_percentage(self.spin_secs, percentage=50), [None] * 2
+        )
         self.next(self.cpu_join)
 
     @resources(cpu=8)
@@ -151,7 +162,7 @@ class MonitorBench(FlowSpec):
         Increase CPU utilization in steps of 10%, ending at 100% utilization
         """
         for i in range(10):
-            spin_cpu_percentage(self.spin_secs/10, i*10)
+            spin_cpu_percentage(self.spin_secs / 10, i * 10)
         self.next(self.cpu_join)
 
     @step
@@ -166,6 +177,7 @@ class MonitorBench(FlowSpec):
             self.mem_staircase_8gb,
             self.mem_increasing_rss,
             self.mem_spike_2gb,
+            self.mem_oom,
             self.mem_mmap_8gb_untouch,
             self.mem_mmap_8gb_touch_incrementally,
             self.mem_mmap_8gb_touch_all,
@@ -239,6 +251,25 @@ class MonitorBench(FlowSpec):
         print("after spike")
         _print_mem()
         time.sleep(self.spin_secs / 2)
+        self.next(self.mem_join)
+
+    @retry
+    @catch
+    @resources(memory=2000)
+    @step
+    def mem_oom(self):
+        """
+        Cause an OOM and @catch it
+        """
+        if self.enable_oom:
+            print("allocating too much memory soon")
+            time.sleep(2)
+            c = load_libc()
+            p = c.malloc(4_000_000_000)
+            c.memset(p, 66, 4_000_000_000)
+            print("you shouldn't see this line!")
+        else:
+            print("oom test disabled")
         self.next(self.mem_join)
 
     @resources(memory=2000)
