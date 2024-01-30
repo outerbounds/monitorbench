@@ -1,20 +1,22 @@
+from metaflow.cards import Markdown, Table, VegaChart
+from functools import wraps
+import threading
+from datetime import datetime
+from metaflow import current
+from metaflow.cards import Table, Markdown, VegaChart, Image
+import time
+
 import re
 import os
 from tempfile import TemporaryFile
-from subprocess import check_call, check_output, Popen
+from subprocess import check_output, Popen
 from datetime import datetime
 from functools import wraps
 
 # Card plot styles
 MEM_COLOR = "#0c64d6"
 GPU_COLOR = "#ff69b4"
-AXES_COLOR = "#666"
-LABEL_COLOR = "#333"
-FONTSIZE = 10
-AXES_LINEWIDTH = 0.5
-PLOT_LINEWIDTH = 1.2
-WIDTH = 12
-HEIGHT = 8
+
 
 DRIVER_VER = re.compile(b"Driver Version: (.+?) ")
 CUDA_VER = re.compile(b"CUDA Version:(.*) ")
@@ -40,16 +42,47 @@ done
 )
 
 
+def _update_utilization(results, md_dict):
+    for device, data in results["profile"].items():
+        md_dict[device]["gpu"].update(
+            "%2.1f%%" % max(map(float, data["gpu_utilization"]))
+        )
+        md_dict[device]["memory"].update("%dMB" % max(map(float, data["memory_used"])))
+
+
+def _update_charts(results, md_dict):
+    for device, data in results["profile"].items():
+        gpu_plot, mem_plot = profile_plots(
+            device,
+            data["timestamp"],
+            data["gpu_utilization"],
+            data["memory_used"],
+            data["memory_total"],
+        )
+        md_dict[device]["gpu"].update(gpu_plot)
+        md_dict[device]["memory"].update(mem_plot)
+
+
+# This code is adapted from: https://github.com/outerbounds/monitorbench
 class GPUProfiler:
     def __init__(self, interval=1):
         self.driver_ver, self.cuda_ver, self.error = self._read_versions()
+        (
+            self.interconnect_data,
+            self.interconnect_legend,
+        ) = self._read_multi_gpu_interconnect()
         if self.error:
             self.devices = []
+            return
         else:
             self.devices = self._read_devices()
             self._monitor_out = TemporaryFile()
             cmd = MONITOR.format(interval=interval, pid=os.getpid())
+            self._interval = interval
             self._monitor_proc = Popen(["bash", "-c", cmd], stdout=self._monitor_out)
+
+        self._card_comps = {"max_utilization": {}, "charts": {}}
+        self._card_created = False
 
     def finish(self):
         ret = {
@@ -63,7 +96,131 @@ class GPUProfiler:
             self._monitor_proc.terminate()
             ret["devices"] = self.devices
             ret["profile"] = self._read_monitor()
+            ret["interconnect"] = {
+                "data": self.interconnect_data,
+                "legend": self.interconnect_legend,
+            }
             return ret
+
+    def _make_reading(self):
+        ret = {
+            "error": self.error,
+            "cuda_version": self.cuda_ver,
+            "driver_version": self.driver_ver,
+        }
+        if self.error:
+            return ret
+        else:
+            ret["devices"] = self.devices
+            ret["profile"] = self._read_monitor()
+            ret["interconnect"] = {
+                "data": self.interconnect_data,
+                "legend": self.interconnect_legend,
+            }
+            return ret
+
+    def _update_card(self):
+        if len(self.devices) == 0:
+
+            current.card["gpu_profile"].clear()
+            current.card["gpu_profile"].append(
+                Markdown("## GPU profile failed: %s" % self.error)
+            )
+            current.card["gpu_profile"].refresh()
+
+            return
+
+        while True:
+            readings = self._make_reading()
+            if readings is None:
+                time.sleep(self._interval)
+                continue
+            _update_utilization(readings, self._card_comps["max_utilization"])
+            _update_charts(readings, self._card_comps["charts"])
+            current.card["gpu_profile"].refresh()
+            time.sleep(self._interval)
+
+    def _setup_card(self, artifact_name):
+        from metaflow import current
+
+        results = self._make_reading()
+        els = current.card["gpu_profile"]
+
+        def _drivers():
+            els.append(Markdown("## Drivers"))
+            els.append(
+                Table(
+                    [[results["cuda_version"], results["driver_version"]]],
+                    headers=["NVidia driver version", "CUDA version"],
+                )
+            )
+
+        def _devices():
+            els.append(Markdown("## Devices"))
+            rows = [
+                [d["device_id"], d["name"], d["memory"]] for d in results["devices"]
+            ]
+            els.append(Table(rows, headers=["Device ID", "Device type", "GPU memory"]))
+
+        def _interconnect():
+            if results["interconnect"]["data"] and results["interconnect"]["legend"]:
+                els.append(Markdown("## Interconnect"))
+                interconnect_data = results["interconnect"]["data"]
+                rows = list(interconnect_data.values())
+                rows = [list(transpose_row) for transpose_row in list(zip(*rows))]
+                els.append(Table(rows, headers=list(interconnect_data.keys())))
+                els.append(Markdown("#### Legend"))
+                els.append(
+                    Table(
+                        [list(results["interconnect"]["legend"].values())],
+                        headers=list(results["interconnect"]["legend"].keys()),
+                    )
+                )
+
+        def _utilization():
+            els.append(Markdown("## Maximum utilization"))
+            rows = {}
+            for d in results["devices"]:
+                rows[d["device_id"]] = {
+                    "gpu": Markdown("0%"),
+                    "memory": Markdown("0MB"),
+                }
+            _rows = [[Markdown(k)] + list(v.values()) for k, v in rows.items()]
+            els.append(
+                Table(data=_rows, headers=["Device ID", "Max GPU %", "Max memory"])
+            )
+            els.append(
+                Markdown(f"Detailed data saved in an artifact `{artifact_name}`")
+            )
+            return rows
+
+        def _plots():
+            els.append(Markdown("## GPU utilization and memory usage over time"))
+
+            rows = {}
+            for d in results["devices"]:
+                gpu_plot, mem_plot = profile_plots(d["device_id"], [], [], [], [])
+                rows[d["device_id"]] = {
+                    "gpu": VegaChart(gpu_plot),
+                    "memory": VegaChart(mem_plot),
+                }
+            for k, v in rows.items():
+                els.append(Markdown("### GPU Utilization for device : %s" % k))
+                els.append(
+                    Table(
+                        data=[
+                            [Markdown("GPU Utilization"), v["gpu"]],
+                            [Markdown("Memory usage"), v["memory"]],
+                        ]
+                    )
+                )
+            return rows
+
+        _drivers()
+        _devices()
+        _interconnect()
+        self._card_comps["max_utilization"] = _utilization()
+        self._card_comps["charts"] = _plots()
 
     def _read_monitor(self):
         devdata = {}
@@ -116,16 +273,63 @@ class GPUProfiler:
             for l in out.decode("utf-8").splitlines()
         ]
 
+    def _read_multi_gpu_interconnect(self):
+        """
+        parse output of `nvidia-smi tomo -m`, such as this sample:
+
+            GPU0    GPU1    CPU Affinity    NUMA Affinity
+            GPU0     X      NV2     0-23            N/A
+            GPU1    NV2      X      0-23            N/A
+
+        returns two dictionaries describing multi-GPU topology:
+            data: {index: [GPU0, GPU1, ...], GPU0: [X, NV2, ...], GPU1: [NV2, X, ...], ...}
+            legend_items: {X: 'Same PCI', NV2: 'NVLink 2', ...}
+        """
+        try:
+
+            import re
+
+            ansi_escape = re.compile(r"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
+
+            out = check_output(["nvidia-smi", "topo", "-m"])
+            rows = out.decode("utf-8").split("\n")
+
+            header = ansi_escape.sub("", rows[0]).split("\t")[1:]
+            data = {}
+            data["index"] = []
+            data |= {k: [] for k in header}
+
+            for i, row in enumerate(rows[1:]):
+                row = ansi_escape.sub("", row).split()
+                if len(row) == 0:
+                    continue
+                if row[0].startswith("GPU"):
+                    data["index"].append(row[0])
+                    for key, val in zip(header, row[1:]):
+                        data[key].append(val)
+                elif row[0].startswith("Legend"):
+                    break
+
+            legend_items = {}
+            for legend_row in rows[i:]:
+                if legend_row == "" or legend_row.startswith("Legend"):
+                    continue
+                res = legend_row.strip().split(" = ")
+                legend_items[res[0].strip()] = res[1].strip()
+
+            return data, legend_items
+
+        except:
+            return None, None
+
 
 class gpu_profile:
     def __init__(
         self,
-        with_card=True,
         include_artifacts=True,
         artifact_prefix="gpu_profile_",
         interval=1,
     ):
-        self.with_card = with_card
         self.include_artifacts = include_artifacts
         self.artifact_prefix = artifact_prefix
         self.interval = interval
@@ -136,6 +340,15 @@ class gpu_profile:
             prof = GPUProfiler(interval=self.interval)
             if self.include_artifacts:
                 setattr(s, self.artifact_prefix + "num_gpus", len(prof.devices))
+
+            current.card["gpu_profile"].append(
+                Markdown("# GPU profile for `%s`" % current.pathspec)
+            )
+            prof._setup_card(self.artifact_prefix + "data")
+            current.card["gpu_profile"].refresh()
+            update_thread = threading.Thread(target=prof._update_card, daemon=True)
+            update_thread.start()
+
             try:
                 f(s)
             finally:
@@ -145,173 +358,79 @@ class gpu_profile:
                     results = {"error": "couldn't read profiler results"}
                 if self.include_artifacts:
                     setattr(s, self.artifact_prefix + "data", results)
-                if self.with_card:
-                    try:
-                        make_card(results, self.artifact_prefix + "data")
-                    except:
-                        pass
 
-        if self.with_card:
-            from metaflow import card
+        from metaflow import card
 
-            return card(type="blank", id="gpu_profile")(func)
-        else:
-            return func
-
-
-def make_plot(
-    tstamps,
-    vals,
-    y_label,
-    legend,
-    line_color=None,
-    secondary_y_factor=None,
-    secondary_y_label="",
-):
-    import matplotlib.dates as mdates
-    import matplotlib.ticker as mtick
-    import matplotlib.pyplot as plt
-
-    first = tstamps[0]
-
-    def seconds_since_start(x):
-        return (x - mdates.date2num(first)) * (24 * 60 * 60)
-
-    with plt.rc_context(
-        {
-            "axes.edgecolor": AXES_COLOR,
-            "axes.linewidth": AXES_LINEWIDTH,
-            "xtick.color": AXES_COLOR,
-            "ytick.color": AXES_COLOR,
-            "text.color": LABEL_COLOR,
-            "font.size": FONTSIZE,
-        }
-    ):
-        fig = plt.figure(figsize=(WIDTH, HEIGHT))
-        ax = fig.add_subplot(111)
-
-        # left Y axis shows %
-        ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-        ax.set_ylabel(y_label, labelpad=20)
-
-        # top X axis shows seconds since start
-        topax = ax.secondary_xaxis("top", functions=(seconds_since_start, lambda _: _))
-        topax.set_xlabel("Seconds since task start", labelpad=20)
-        # strange bug - secondary x axis become slightly thicker without this
-        topax.spines["top"].set_linewidth(0)
-
-        # bottom X axis shows timestamp
-        ax.xaxis.set_major_formatter(
-            mdates.ConciseDateFormatter(ax.xaxis.get_major_locator())
+        return card(type="blank", id="gpu_profile", refresh_interval=self.interval)(
+            func
         )
-        ax.set_xlabel("Time", labelpad=20)
-
-        if secondary_y_factor is not None:
-            rightax = ax.secondary_yaxis(
-                "right",
-                functions=(
-                    lambda x: (x / 100) * secondary_y_factor,
-                    lambda x: (x / 100) / secondary_y_factor,
-                ),
-            )
-            rightax.set_ylabel(secondary_y_label, labelpad=20)
-
-        line = ax.plot(tstamps, vals, linewidth=PLOT_LINEWIDTH, color=line_color)
-        ax.legend([legend], loc="upper left")
-    return ax
 
 
-def profile_plots(device_id, profile_data):
-    data = profile_data[device_id]
-    tstamps = [datetime.strptime(t, "%Y/%m/%d %H:%M:%S") for t in data["timestamp"]]
-    gpu = list(map(float, data["gpu_utilization"]))
-    mem = [
-        100.0 * float(used) / float(total)
-        for used, total in zip(data["memory_used"], data["memory_total"])
-    ]
-    gpu_plot = make_plot(
-        tstamps, gpu, "GPU utilization", "device: %s" % device_id, line_color=GPU_COLOR
+def translate_to_vegalite(
+    tstamps, vals, description ,y_label, legend, line_color=None, percentage_format=False
+):
+    # Preprocessing for Vega-Lite
+    # Assuming tstamps is a list of datetime objects and vals is a list of values
+    data = [{"tstamps": str(t), "vals": v} for t, v in zip(tstamps, vals)]
+
+    # Base Vega-Lite spec
+    vega_lite_spec = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": description,
+        "data": {"values": data},
+        "width": 600,
+        "height": 400,
+        "encoding": {
+            "x": {"field": "tstamps", "type": "temporal", "axis": {"title": "Time"}},
+            "y": {
+                "field": "vals",
+                "type": "quantitative",
+                "axis": {
+                    "title": y_label,
+                    **({"format": "%"} if percentage_format else {}),
+                },
+            },
+        },
+        "layer": [
+            {
+                "mark": {
+                    "type": "line",
+                    "color": line_color if line_color else "blue",
+                    "tooltip": True,
+                    "description": legend,  # Adding legend as description
+                },
+                "encoding": {"tooltip": [{"field": "tstamps"}, {"field": "vals"}]},
+            }
+        ],
+    }
+
+    return vega_lite_spec
+
+
+def profile_plots(device_id, ts, gpu, mem_used, mem_total):
+    tstamps = [datetime.strptime(t, "%Y/%m/%d %H:%M:%S") for t in ts]
+    gpu = [i / 100 for i in list(map(float, gpu))]
+    mem = [float(used) / float(total) for used, total in zip(mem_used, mem_total)]
+
+    gpu_plot = translate_to_vegalite(
+        tstamps,
+        gpu,
+        "GPU utilization",
+        "GPU utilization",
+        "device: %s" % device_id,
+        line_color=GPU_COLOR,
+        percentage_format=True,
     )
-    mem_plot = make_plot(
+    mem_plot = translate_to_vegalite(
         tstamps,
         mem,
-        "Memory utilization",
+        "Percentage Memory utilization",
+        "Percentage Memory utilization",
         "device: %s" % device_id,
         line_color=MEM_COLOR,
-        secondary_y_factor=float(data["memory_total"][0]),
-        secondary_y_label="Memory usage in MBs",
+        percentage_format=True,
     )
     return gpu_plot, mem_plot
-
-
-def make_card(results, artifact_name):
-    from metaflow import current
-    from metaflow.cards import Table, Markdown, Image
-
-    els = []
-
-    def _error():
-        els.append(Markdown(f"## GPU profiler failed:\n```results['error']```"))
-
-    def _drivers():
-        els.append(Markdown("## Drivers"))
-        els.append(
-            Table(
-                [[results["cuda_version"], results["driver_version"]]],
-                headers=["NVidia driver version", "CUDA version"],
-            )
-        )
-
-    def _devices():
-        els.append(Markdown("## Devices"))
-        rows = [[d["device_id"], d["name"], d["memory"]] for d in results["devices"]]
-        els.append(Table(rows, headers=["Device ID", "Device type", "GPU memory"]))
-
-    def _utilization():
-        els.append(Markdown("## Maximum utilization"))
-        rows = []
-        for device, data in results["profile"].items():
-            max_gpu = max(map(float, data["gpu_utilization"]))
-            max_mem = max(map(float, data["memory_used"]))
-            rows.append([device, "%2.1f%%" % max_gpu, "%dMB" % max_mem])
-        els.append(Table(rows, headers=["Device ID", "Max GPU %", "Max memory"]))
-        els.append(Markdown(f"Detailed data saved in an artifact `{artifact_name}`"))
-
-    def _plots():
-        rows = []
-        for device in results["profile"]:
-            gpu_plot, mem_plot = profile_plots(device, results["profile"])
-            rows.append(
-                [
-                    device,
-                    Image.from_matplotlib(gpu_plot),
-                    Image.from_matplotlib(mem_plot),
-                ]
-            )
-        els.append(
-            Table(rows, headers=["Device ID", "GPU Utilization", "Memory usage"])
-        )
-
-    els.append(Markdown(f"# GPU profile for `{current.pathspec}`"))
-    if results["error"]:
-        _error()
-    else:
-        _drivers()
-        _devices()
-        _utilization()
-
-        try:
-            import matplotlib
-        except:
-            els.append(Markdown("Install `matplotlib` to enable plots"))
-        else:
-            try:
-                _plots()
-            except:
-                els.append(Markdown("Couldn't create plots"))
-
-    for el in els:
-        current.card["gpu_profile"].append(el)
 
 
 if __name__ == "__main__":
