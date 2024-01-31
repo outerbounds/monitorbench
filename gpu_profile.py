@@ -52,15 +52,27 @@ def _update_utilization(results, md_dict):
 
 def _update_charts(results, md_dict):
     for device, data in results["profile"].items():
-        gpu_plot, mem_plot = profile_plots(
-            device,
-            data["timestamp"],
-            data["gpu_utilization"],
-            data["memory_used"],
-            data["memory_total"],
-        )
-        md_dict[device]["gpu"].update(gpu_plot)
-        md_dict[device]["memory"].update(mem_plot)
+        try:
+            _data =  [
+                data["timestamp"],
+                data["gpu_utilization"],
+                data["memory_used"],
+                data["memory_total"],
+            ]
+            min_val = min([len(x) for x in _data])
+            max_val = max([len(x) for x in _data])
+            gpu_plot, mem_plot = profile_plots(
+                device,
+                data["timestamp"][:min_val],
+                data["gpu_utilization"][:min_val],
+                data["memory_used"][:min_val],
+                data["memory_total"][:min_val],
+            )
+            md_dict[device]["gpu"].update(gpu_plot)
+            md_dict[device]["memory"].update(mem_plot)
+        except ValueError: 
+            # This is thrown when the date is unparsable. We can just safely ignore this. 
+            pass
 
 
 # This code is adapted from: https://github.com/outerbounds/monitorbench
