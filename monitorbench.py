@@ -346,8 +346,9 @@ class MonitorBench(FlowSpec):
         time.sleep(self.spin_secs / 2)
         x = b"1" * 1_000_000_000
         num_gigs = 8
-        with NamedTemporaryFile() as tmp:
+        with open('tmpfile.tmp', 'w+b') as tmp:
             _make_file(tmp.name, num_gigs * 1000)
+            tmp.flush()
         time.sleep(self.spin_secs / 2)
         self.next(self.io_join)
 
@@ -360,8 +361,9 @@ class MonitorBench(FlowSpec):
         x = b"1" * 1_000_000_000
         for _ in range(10):
             num_gigs = 8
-            with NamedTemporaryFile() as tmp:
+            with open('tmpfile.tmp', 'w+b') as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
+                tmp.flush()
             spin_cpu_percentage(self.spin_secs / 10)
         self.next(self.io_join)
 
