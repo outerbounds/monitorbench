@@ -8,6 +8,7 @@ import time
 
 import re
 import os
+import sys
 from tempfile import TemporaryFile
 from subprocess import check_output, Popen
 from datetime import datetime
@@ -44,6 +45,9 @@ done
 
 def _update_utilization(results, md_dict):
     for device, data in results["profile"].items():
+        if device not in md_dict:
+            print("Device %s not found in the GPU card layout. Skipping..." % device, file=sys.stderr)
+            continue
         md_dict[device]["gpu"].update(
             "%2.1f%%" % max(map(float, data["gpu_utilization"]))
         )
@@ -53,26 +57,28 @@ def _update_utilization(results, md_dict):
 def _update_charts(results, md_dict):
     for device, data in results["profile"].items():
         try:
-            _data =  [
-                data["timestamp"],
-                data["gpu_utilization"],
-                data["memory_used"],
-                data["memory_total"],
-            ]
-            min_val = min([len(x) for x in _data])
-            max_val = max([len(x) for x in _data])
+            if device not in md_dict:
+                print("Device %s not found in the GPU card layout. Skipping..." % device, file=sys.stderr)
+                continue
+            bad_indices = list(_extract_unparable_date_indices(data["timestamp"]))
+            if len(bad_indices) > 0:
+                print(
+                    "Unparsable dates found in the gpu profile data. Ignoring these indices: %s"
+                    % str(bad_indices),
+                    file=sys.stderr,
+                )
             gpu_plot, mem_plot = profile_plots(
                 device,
-                data["timestamp"][:min_val],
-                data["gpu_utilization"][:min_val],
-                data["memory_used"][:min_val],
-                data["memory_total"][:min_val],
+                _remove_indicies_from_list(bad_indices, data["timestamp"]),
+                _remove_indicies_from_list(bad_indices, data["gpu_utilization"]),
+                _remove_indicies_from_list(bad_indices, data["memory_used"]),
+                _remove_indicies_from_list(bad_indices, data["memory_total"]),
             )
             md_dict[device]["gpu"].update(gpu_plot)
             md_dict[device]["memory"].update(mem_plot)
-        except ValueError: 
+        except ValueError as e: 
             # This is thrown when the date is unparsable. We can just safely ignore this. 
-            pass
+            print("ValueError: Could not parse date \n%s" % str(e), file=sys.stderr)
 
 
 # This code is adapted from: https://github.com/outerbounds/monitorbench
@@ -417,6 +423,16 @@ def translate_to_vegalite(
     }
 
     return vega_lite_spec
+
+def _extract_unparable_date_indices(tstamps):
+    for i, t in enumerate(tstamps):
+        try:
+            datetime.strptime(t, "%Y/%m/%d %H:%M:%S")
+        except ValueError as e:
+            yield i
+
+def _remove_indicies_from_list(indices, lst):
+    return [i for j, i in enumerate(lst) if j not in indices]
 
 
 def profile_plots(device_id, ts, gpu, mem_used, mem_total):
