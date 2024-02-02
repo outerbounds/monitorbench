@@ -133,6 +133,7 @@ class GPUMonitor:
         self._tempdir = TemporaryDirectory(prefix="gpu_card_monitor", dir="./")
         self._interval = interval
         self._duration = duration
+        self._finished = False
 
     @property
     def _current_file(self):
@@ -253,11 +254,12 @@ class GPUMonitor:
         self._current_readings = None
 
     def cleanup(self):
+        self._finished = True
         AsyncProcessManager.cleanup()
         self._tempdir.cleanup()
 
     def _monitor_update_thread(self):
-        while True:
+        while not self._finished:
             self._update_readings()
             time.sleep(self._interval)
 
