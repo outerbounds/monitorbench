@@ -5,18 +5,24 @@ from datetime import datetime
 from metaflow import current
 from metaflow.cards import Table, Markdown, VegaChart, Image
 import time
+import shutil
 
 import re
 import os
+import uuid
+import json
 import sys
-from tempfile import TemporaryFile
+from tempfile import TemporaryFile, TemporaryDirectory
 from subprocess import check_output, Popen
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
+from collections import namedtuple
 
 # Card plot styles
 MEM_COLOR = "#0c64d6"
 GPU_COLOR = "#ff69b4"
+
+NVIDIA_TS_FORMAT = "%Y/%m/%d %H:%M:%S"
 
 
 DRIVER_VER = re.compile(b"Driver Version: (.+?) ")
@@ -29,24 +35,246 @@ MONITOR_FIELDS = [
     "memory_total",
 ]
 
-MONITOR = """
-set -e;
-while kill -0 {pid} 2>/dev/null;
-do
- nvidia-smi
-   --query-gpu=pci.bus_id,timestamp,utilization.gpu,memory.used,memory.total
-   --format=csv,noheader,nounits;
- sleep {interval};
-done
-""".replace(
-    "\n", " "
-)
+MONITOR = """nvidia-smi --query-gpu=pci.bus_id,timestamp,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits -l {interval};"""
+ProcessUUID = namedtuple("ProcessUUID", ["uuid", "start_time", "end_time"])
+
+
+def _get_uuid(time_duration=600):
+    frmt_str = "%Y-%m-%d-%H-%M-%S"
+    # Create a datetime range between the timerange values using current date as start date and time_duration as end date
+    start_date = datetime.now()
+    end_date = start_date + timedelta(seconds=time_duration)
+    datetime_range = start_date = (
+        datetime.now().strftime(frmt_str) + "_" + end_date.strftime(frmt_str)
+    )
+    uuid_str = uuid.uuid4().hex.replace("-", "") + "_" + datetime_range
+    return ProcessUUID(uuid_str, start_date, end_date)
+
+
+class AsyncProcessManager:
+    """
+    This class is responsible for managing the nvidia SMI subprocesses
+    """
+
+    processes = {
+        # "procid": {
+        #     "proc": subprocess.Popen,
+        #     "started": time.time()
+        # }
+    }
+
+    @classmethod
+    def _register_process(cls, procid, proc):
+        cls.processes[procid] = {
+            "proc": proc,
+            "started": time.time(),
+        }
+
+    @classmethod
+    def get(cls, procid):
+        proc_dict = cls.processes.get(procid, None)
+        if proc_dict is not None:
+            return proc_dict["proc"], proc_dict["started"]
+        return None, None
+
+    @classmethod
+    def spawn(cls, procid, cmd, file):
+        proc = Popen(cmd, stdout=file)
+        cls._register_process(procid, proc)
+
+    @classmethod
+    def remove(cls, procid, delete_item=True):
+        if procid in cls.processes:
+            if cls.processes[procid]["proc"].stdout is not None:
+                cls.processes[procid]["proc"].stdout.close()
+            cls.processes[procid]["proc"].terminate()
+            cls.processes[procid]["proc"].wait()
+            if delete_item:
+                del cls.processes[procid]
+
+    @classmethod
+    def cleanup(cls):
+        for procid in cls.processes:
+            cls.remove(procid, delete_item=False)
+        cls.processes.clear()
+
+    @classmethod
+    def is_running(cls, procid):
+        if procid not in cls.processes:
+            return False
+        return cls.processes[procid]["proc"].poll() is None
+
+
+def _parse_timestamp(timestamp):
+    try:
+        ts = timestamp.split(".")[0]
+        return datetime.strptime(ts, NVIDIA_TS_FORMAT)
+    except ValueError:
+        return None
+
+
+class GPUMonitor:
+    """
+    This class if responsible for calling `nvidia-smi -l 1` for creating log files
+    that hold the GPU utilization and memory usage.
+    Each Log file will be stored in the `monitor` temporary directory.
+    Every N seconds the file will be closed and a new file will be created from the same monitor.
+    """
+
+    _started_processes = []
+
+    _current_process: ProcessUUID = None
+
+    _current_readings = {}
+
+    _past_readings = {}
+
+    def __init__(self, interval=1, duration=300) -> None:
+        self._tempdir = TemporaryDirectory(prefix="gpu_card_monitor", dir="./")
+        self._interval = interval
+        self._duration = duration
+
+    @property
+    def _current_file(self):
+        if self._current_process is None:
+            return None
+        return os.path.join(self._tempdir.name, self._current_process.uuid + ".csv")
+
+    def get_file_name(self, uuid):
+        return os.path.join(self._tempdir.name, uuid + ".csv")
+
+    def create_new_monitor(self):
+        uuid = _get_uuid(self._duration)
+        file = open(self.get_file_name(uuid.uuid), "w")
+        cmd = MONITOR.format(interval=self._interval, time_duration=self._duration)
+        AsyncProcessManager.spawn(uuid.uuid, ["bash", "-c", cmd], file)
+        self._started_processes.append(uuid)
+        self._current_process = uuid
+        return uuid
+
+    def clear_current_monitor(self):
+        if self._current_process is None:
+            return
+        AsyncProcessManager.remove(self._current_process.uuid)
+        self._current_process = None
+
+    def current_process_has_ended(self):
+        if self._current_process is None:
+            return True
+        return datetime.now() > self._current_process.end_time
+
+    def current_process_is_running(self):
+        if self._current_process is None:
+            return False
+        return AsyncProcessManager.is_running(self._current_process.uuid)
+
+    def _read_monitor(self):
+        """
+        Reads the monitor file and returns the readings in a dictionary format
+        """
+        all_readings = []
+        if self._current_file is None:
+            return None
+        # Extract everything from the CVS File and store it in a list of dictionaries
+        all_fields = ["gpu_id"] + MONITOR_FIELDS
+        with open(self._current_file, "r") as _monitor_out:
+            for line in _monitor_out.readlines():
+                data = {}
+                fields = [f.strip() for f in line.split(",")]
+                if len(fields) == len(all_fields):
+                    # strip subsecond resolution from timestamps that doesn't align across devices
+                    for idx, _f in enumerate(all_fields):
+                        data[_f] = fields[idx]
+                    all_readings.append(data)
+                else:
+                    # expect that the last line may be truncated
+                    break
+
+        # Convert to dictionary format
+        devdata = {}
+        for reading in all_readings:
+            gpu_id = reading["gpu_id"]
+            if "timestamp" not in reading:
+                continue
+            if _parse_timestamp(reading["timestamp"]) is None:
+                continue
+            reading["timestamp"] = reading["timestamp"].split(".")[0]
+            if gpu_id not in devdata:
+                devdata[gpu_id] = {}
+
+            for i, field in enumerate(MONITOR_FIELDS):
+                if field not in devdata[gpu_id]:
+                    devdata[gpu_id][field] = []
+                devdata[gpu_id][field].append(reading[field])
+        return devdata
+
+    def _update_readings(self):
+        """
+        Core update function that checks if the current process has ended and if so, it will create a new monitor
+        otherwise sets the current readings to the readings from the monitor file
+        """
+        if self.current_process_has_ended() or not self.current_process_is_running():
+            self._update_past_readings()
+            self.clear_current_monitor()
+            self.create_new_monitor()
+            time.sleep(
+                2
+            )  # Sleep for 2 seconds to allow the new process to start and we can make a reading
+
+        readings = self._read_monitor()
+        if readings is None:
+            return
+        self._current_readings = readings
+
+    @staticmethod
+    def _make_full_reading(current, past):
+        if current is None:
+            return past
+        for gpu_id in current:
+            if gpu_id not in past:
+                past[gpu_id] = {}
+            for field in MONITOR_FIELDS:
+                if field not in past[gpu_id]:
+                    past[gpu_id][field] = []
+                past[gpu_id][field].extend(current[gpu_id][field])
+        return past
+
+    def read(self):
+        return self._make_full_reading(
+            self._current_readings, json.loads(json.dumps(self._past_readings))
+        )
+
+    def _update_past_readings(self):
+        if self._current_readings is None:
+            return
+        self._past_readings = self._make_full_reading(
+            self._current_readings, json.loads(json.dumps(self._past_readings))
+        )
+        self._current_readings = None
+
+    def cleanup(self):
+        AsyncProcessManager.cleanup()
+        self._tempdir.cleanup()
+
+    def _monitor_update_thread(self):
+        while True:
+            self._update_readings()
+            time.sleep(self._interval)
+
+
+def _get_ts_range(_range):
+    if _range == "":
+        return "*No readings available*"
+    return "*Time range of charts: %s*" % _range
 
 
 def _update_utilization(results, md_dict):
     for device, data in results["profile"].items():
         if device not in md_dict:
-            print("Device %s not found in the GPU card layout. Skipping..." % device, file=sys.stderr)
+            print(
+                "Device %s not found in the GPU card layout. Skipping..." % device,
+                file=sys.stderr,
+            )
             continue
         md_dict[device]["gpu"].update(
             "%2.1f%%" % max(map(float, data["gpu_utilization"]))
@@ -58,32 +286,25 @@ def _update_charts(results, md_dict):
     for device, data in results["profile"].items():
         try:
             if device not in md_dict:
-                print("Device %s not found in the GPU card layout. Skipping..." % device, file=sys.stderr)
                 continue
-            bad_indices = list(_extract_unparable_date_indices(data["timestamp"]))
-            if len(bad_indices) > 0:
-                print(
-                    "Unparsable dates found in the gpu profile data. Ignoring these indices: %s"
-                    % str(bad_indices),
-                    file=sys.stderr,
-                )
-            gpu_plot, mem_plot = profile_plots(
+            gpu_plot, mem_plot, ts_range = profile_plots(
                 device,
-                _remove_indicies_from_list(bad_indices, data["timestamp"]),
-                _remove_indicies_from_list(bad_indices, data["gpu_utilization"]),
-                _remove_indicies_from_list(bad_indices, data["memory_used"]),
-                _remove_indicies_from_list(bad_indices, data["memory_total"]),
+                data["timestamp"],
+                data["gpu_utilization"],
+                data["memory_used"],
+                data["memory_total"],
             )
             md_dict[device]["gpu"].update(gpu_plot)
             md_dict[device]["memory"].update(mem_plot)
-        except ValueError as e: 
-            # This is thrown when the date is unparsable. We can just safely ignore this. 
+            md_dict[device]["reading_duration"].update(_get_ts_range(ts_range))
+        except ValueError as e:
+            # This is thrown when the date is unparsable. We can just safely ignore this.
             print("ValueError: Could not parse date \n%s" % str(e), file=sys.stderr)
 
 
 # This code is adapted from: https://github.com/outerbounds/monitorbench
 class GPUProfiler:
-    def __init__(self, interval=1):
+    def __init__(self, interval=1, monitor_batch_duration=200):
         self.driver_ver, self.cuda_ver, self.error = self._read_versions()
         (
             self.interconnect_data,
@@ -94,12 +315,16 @@ class GPUProfiler:
             return
         else:
             self.devices = self._read_devices()
-            self._monitor_out = TemporaryFile()
-            cmd = MONITOR.format(interval=interval, pid=os.getpid())
+            self._monitor = GPUMonitor(
+                interval=interval, duration=monitor_batch_duration
+            )
+            self._monitor_thread = threading.Thread(
+                target=self._monitor._monitor_update_thread, daemon=True
+            )
+            self._monitor_thread.start()
             self._interval = interval
-            self._monitor_proc = Popen(["bash", "-c", cmd], stdout=self._monitor_out)
 
-        self._card_comps = {"max_utilization": {}, "charts": {}}
+        self._card_comps = {"max_utilization": {}, "charts": {}, "reading_duration": {}}
         self._card_created = False
 
     def finish(self):
@@ -111,13 +336,13 @@ class GPUProfiler:
         if self.error:
             return ret
         else:
-            self._monitor_proc.terminate()
             ret["devices"] = self.devices
-            ret["profile"] = self._read_monitor()
+            ret["profile"] = self._monitor.read()
             ret["interconnect"] = {
                 "data": self.interconnect_data,
                 "legend": self.interconnect_legend,
             }
+            self._monitor.cleanup()
             return ret
 
     def _make_reading(self):
@@ -130,7 +355,7 @@ class GPUProfiler:
             return ret
         else:
             ret["devices"] = self.devices
-            ret["profile"] = self._read_monitor()
+            ret["profile"] = self._monitor.read()
             ret["interconnect"] = {
                 "data": self.interconnect_data,
                 "legend": self.interconnect_legend,
@@ -139,7 +364,6 @@ class GPUProfiler:
 
     def _update_card(self):
         if len(self.devices) == 0:
-
             current.card["gpu_profile"].clear()
             current.card["gpu_profile"].append(
                 Markdown("## GPU profile failed: %s" % self.error)
@@ -151,6 +375,7 @@ class GPUProfiler:
         while True:
             readings = self._make_reading()
             if readings is None:
+                print("GPU Profiler readings are none", file=sys.stderr)
                 time.sleep(self._interval)
                 continue
             _update_utilization(readings, self._card_comps["max_utilization"])
@@ -217,13 +442,17 @@ class GPUProfiler:
 
             rows = {}
             for d in results["devices"]:
-                gpu_plot, mem_plot = profile_plots(d["device_id"], [], [], [], [])
+                gpu_plot, mem_plot, ts_range = profile_plots(
+                    d["device_id"], [], [], [], []
+                )
                 rows[d["device_id"]] = {
                     "gpu": VegaChart(gpu_plot),
                     "memory": VegaChart(mem_plot),
+                    "reading_duration": Markdown(_get_ts_range(ts_range)),
                 }
             for k, v in rows.items():
                 els.append(Markdown("### GPU Utilization for device : %s" % k))
+                els.append(v["reading_duration"])
                 els.append(
                     Table(
                         data=[
@@ -239,28 +468,6 @@ class GPUProfiler:
         _interconnect()
         self._card_comps["max_utilization"] = _utilization()
         self._card_comps["charts"] = _plots()
-
-    def _read_monitor(self):
-        devdata = {}
-        self._monitor_out.seek(0)
-        for line in self._monitor_out:
-            fields = [f.strip() for f in line.decode("utf-8").split(",")]
-            if len(fields) == len(MONITOR_FIELDS) + 1:
-                # strip subsecond resolution from timestamps that doesn't align across devices
-                fields[1] = fields[1].split(".")[0]
-                if fields[0] in devdata:
-                    data = devdata[fields[0]]
-                else:
-                    devdata[fields[0]] = data = {}
-
-                for i, field in enumerate(MONITOR_FIELDS):
-                    if field not in data:
-                        data[field] = []
-                    data[field].append(fields[i + 1])
-            else:
-                # expect that the last line may be truncated
-                break
-        return devdata
 
     def _read_versions(self):
         def parse(r, s):
@@ -304,7 +511,6 @@ class GPUProfiler:
             legend_items: {X: 'Same PCI', NV2: 'NVLink 2', ...}
         """
         try:
-
             import re
 
             ansi_escape = re.compile(r"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
@@ -362,6 +568,12 @@ class gpu_profile:
             current.card["gpu_profile"].append(
                 Markdown("# GPU profile for `%s`" % current.pathspec)
             )
+            current.card["gpu_profile"].append(
+                Markdown(
+                    "_Reading Started From: %s_"
+                    % datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S %z")
+                )
+            )
             prof._setup_card(self.artifact_prefix + "data")
             current.card["gpu_profile"].refresh()
             update_thread = threading.Thread(target=prof._update_card, daemon=True)
@@ -385,7 +597,13 @@ class gpu_profile:
 
 
 def translate_to_vegalite(
-    tstamps, vals, description ,y_label, legend, line_color=None, percentage_format=False
+    tstamps,
+    vals,
+    description,
+    y_label,
+    legend,
+    line_color=None,
+    percentage_format=False,
 ):
     # Preprocessing for Vega-Lite
     # Assuming tstamps is a list of datetime objects and vals is a list of values
@@ -424,21 +642,16 @@ def translate_to_vegalite(
 
     return vega_lite_spec
 
-def _extract_unparable_date_indices(tstamps):
-    for i, t in enumerate(tstamps):
-        try:
-            datetime.strptime(t, "%Y/%m/%d %H:%M:%S")
-        except ValueError as e:
-            yield i
-
-def _remove_indicies_from_list(indices, lst):
-    return [i for j, i in enumerate(lst) if j not in indices]
-
 
 def profile_plots(device_id, ts, gpu, mem_used, mem_total):
-    tstamps = [datetime.strptime(t, "%Y/%m/%d %H:%M:%S") for t in ts]
+    tstamps = [datetime.strptime(t, NVIDIA_TS_FORMAT) for t in ts]
     gpu = [i / 100 for i in list(map(float, gpu))]
     mem = [float(used) / float(total) for used, total in zip(mem_used, mem_total)]
+    time_stamp_range = ""
+    if len(tstamps) > 1:
+        max_time = max(tstamps).strftime(NVIDIA_TS_FORMAT)
+        min_time = min(tstamps).strftime(NVIDIA_TS_FORMAT)
+        time_stamp_range = "%s to %s" % (min_time, max_time)
 
     gpu_plot = translate_to_vegalite(
         tstamps,
@@ -458,14 +671,20 @@ def profile_plots(device_id, ts, gpu, mem_used, mem_total):
         line_color=MEM_COLOR,
         percentage_format=True,
     )
-    return gpu_plot, mem_plot
+    return gpu_plot, mem_plot, time_stamp_range
 
 
 if __name__ == "__main__":
-    prof = GPUProfiler()
+    prof = GPUProfiler(monitor_batch_duration=10)
+
+    def _write_json_file(data, filename):
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=4)
+
     import time
 
-    time.sleep(5 * 60)
-    import json
+    for i in range(15):
+        time.sleep(1)
+        _write_json_file(prof._monitor.read(), "gpu_profile.json")
 
     print(json.dumps(prof.finish()))
