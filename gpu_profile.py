@@ -115,10 +115,21 @@ def _parse_timestamp(timestamp):
 
 class GPUMonitor:
     """
-    This class if responsible for calling `nvidia-smi -l 1` for creating log files
-    that hold the GPU utilization and memory usage.
-    Each Log file will be stored in the `monitor` temporary directory.
-    Every N seconds the file will be closed and a new file will be created from the same monitor.
+    The `GPUMonitor` class is designed to monitor GPU usage.
+
+    When an instance of `GPUMonitor` is created, it initializes with a specified `interval` and `duration`.
+    The `duration` is the timeperiod it will run the NVIDIA SMI command for and the `interval` is the timeperiod between each reading.
+    The class exposes a `_monitor_update_thread` method which runs as a background thread that continuously updates the GPU usage readings.
+    It will keep running unitl the `_finished` flag is set to `True`.
+
+    The class will statefully manage the the spawned NVIDI-SMI processes.
+    It will start a new NVIDI-SMI process after the current one has ran for the specified `duration`.
+    At a time this class will only maintain readings for the `_current_process` and will have all the aggregated
+    readings for the past processes stored in the `_past_readings` dictionary.
+    When a process finishes completion, the readings are appended to the `_past_readings` dictionary and a new process is started.
+
+    If the caller of this class wishes to read the GPU usage, they can call the `read` method which will return the readings in a dictionary format.
+    The `read` method will aggregate the readings from the `_current_readings` and `_past_readings`.
     """
 
     _started_processes = []
@@ -218,9 +229,8 @@ class GPUMonitor:
             self._update_past_readings()
             self.clear_current_monitor()
             self.create_new_monitor()
-            time.sleep(
-                2
-            )  # Sleep for 2 seconds to allow the new process to start and we can make a reading
+            # Sleep for 1 seconds to allow the new process to start and we can make a reading
+            time.sleep(1)
 
         readings = self._read_monitor()
         if readings is None:
