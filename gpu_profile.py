@@ -570,7 +570,7 @@ class gpu_profile:
             )
             current.card["gpu_profile"].append(
                 Markdown(
-                    "_Reading Started From: %s_"
+                    "_Started at: %s_"
                     % datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S %z")
                 )
             )
