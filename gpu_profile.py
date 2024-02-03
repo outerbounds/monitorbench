@@ -43,6 +43,10 @@ done
 class GPUProfiler:
     def __init__(self, interval=1):
         self.driver_ver, self.cuda_ver, self.error = self._read_versions()
+        (
+            self.interconnect_data,
+            self.interconnect_legend,
+        ) = self._read_multi_gpu_interconnect()
         if self.error:
             self.devices = []
         else:
@@ -63,6 +67,10 @@ class GPUProfiler:
             self._monitor_proc.terminate()
             ret["devices"] = self.devices
             ret["profile"] = self._read_monitor()
+            ret["interconnect"] = {
+                "data": self.interconnect_data,
+                "legend": self.interconnect_legend,
+            }
             return ret
 
     def _read_monitor(self):
@@ -115,6 +123,55 @@ class GPUProfiler:
             )
             for l in out.decode("utf-8").splitlines()
         ]
+
+    def _read_multi_gpu_interconnect(self):
+        """
+        parse output of `nvidia-smi tomo -m`, such as this sample:
+
+            GPU0    GPU1    CPU Affinity    NUMA Affinity
+            GPU0     X      NV2     0-23            N/A
+            GPU1    NV2      X      0-23            N/A
+
+        returns two dictionaries describing multi-GPU topology:
+            data: {index: [GPU0, GPU1, ...], GPU0: [X, NV2, ...], GPU1: [NV2, X, ...], ...}
+            legend_items: {X: 'Same PCI', NV2: 'NVLink 2', ...}
+        """
+        try:
+
+            import re
+
+            ansi_escape = re.compile(r"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
+
+            out = check_output(["nvidia-smi", "topo", "-m"])
+            rows = out.decode("utf-8").split("\n")
+
+            header = ansi_escape.sub("", rows[0]).split("\t")[1:]
+            data = {}
+            data["index"] = []
+            data |= {k: [] for k in header}
+
+            for i, row in enumerate(rows[1:]):
+                row = ansi_escape.sub("", row).split()
+                if len(row) == 0:
+                    continue
+                if row[0].startswith("GPU"):
+                    data["index"].append(row[0])
+                    for key, val in zip(header, row[1:]):
+                        data[key].append(val)
+                elif row[0].startswith("Legend"):
+                    break
+
+            legend_items = {}
+            for legend_row in rows[i:]:
+                if legend_row == "" or legend_row.startswith("Legend"):
+                    continue
+                res = legend_row.strip().split(" = ")
+                legend_items[res[0].strip()] = res[1].strip()
+
+            return data, legend_items
+
+        except:
+            return None, None
 
 
 class gpu_profile:
@@ -267,6 +324,21 @@ def make_card(results, artifact_name):
         rows = [[d["device_id"], d["name"], d["memory"]] for d in results["devices"]]
         els.append(Table(rows, headers=["Device ID", "Device type", "GPU memory"]))
 
+    def _interconnect():
+        if results["interconnect"]["data"] and results["interconnect"]["legend"]:
+            els.append(Markdown("## Interconnect"))
+            interconnect_data = results["interconnect"]["data"]
+            rows = list(interconnect_data.values())
+            rows = [list(transpose_row) for transpose_row in list(zip(*rows))]
+            els.append(Table(rows, headers=list(interconnect_data.keys())))
+            els.append(Markdown("#### Legend"))
+            els.append(
+                Table(
+                    [list(results["interconnect"]["legend"].values())],
+                    headers=list(results["interconnect"]["legend"].keys()),
+                )
+            )
+
     def _utilization():
         els.append(Markdown("## Maximum utilization"))
         rows = []
@@ -298,6 +370,7 @@ def make_card(results, artifact_name):
     else:
         _drivers()
         _devices()
+        _interconnect()
         _utilization()
 
         try:
