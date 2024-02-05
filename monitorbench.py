@@ -68,9 +68,9 @@ class MonitorBench(FlowSpec):
     @step
     def start(self):
         self.next(
-            self.cpu_1cores,
+            self.cpu_3cores,
             self.cpu_2cores,
-            self.cpu_1cores_halfload,
+            self.cpu_3cores_halfload,
             self.cpu_2cores_halfload,
             self.cpu_8cores,
             self.cpu_8cores_underprovisioned,
@@ -79,13 +79,13 @@ class MonitorBench(FlowSpec):
             self.cpu_staircase,
         )
 
-    @resources(cpu=1)
+    @resources(cpu=3)
     @step
-    def cpu_1cores(self):
+    def cpu_3cores(self):
         """
         One core, 100% utilized
         """
-        spin_cpu_percentage(self.spin_secs)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 3)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
@@ -97,13 +97,13 @@ class MonitorBench(FlowSpec):
         parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 2)
         self.next(self.cpu_join)
 
-    @resources(cpu=1)
+    @resources(cpu=3)
     @step
-    def cpu_1cores_halfload(self):
+    def cpu_3cores_halfload(self):
         """
         One core, 50% utilized
         """
-        spin_cpu_percentage(self.spin_secs, percentage=50)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs, percentage=50), [None] * 2)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
