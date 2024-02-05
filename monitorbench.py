@@ -36,8 +36,6 @@ def spin_cpu_percentage(seconds, percentage=100):
     print(f"Running at {percentage}% CPU Utilization for {seconds} seconds...")
     for i in range(0, seconds):
         start_time = time.time()
-        if i % 10 == 0:
-            print(f"Beginning work cycle {i}/{seconds} seconds...")
         # Perform work for the required percentage of this second
         while (time.time() - start_time) < (percentage / 100.0):
             a = math.sqrt(64 * 64 * 64 * 64 * 64)
@@ -70,9 +68,9 @@ class MonitorBench(FlowSpec):
     @step
     def start(self):
         self.next(
-            self.cpu_1cores,
+            self.cpu_3cores,
             self.cpu_2cores,
-            self.cpu_1cores_halfload,
+            self.cpu_3cores_halfload,
             self.cpu_2cores_halfload,
             self.cpu_8cores,
             self.cpu_8cores_underprovisioned,
@@ -81,13 +79,13 @@ class MonitorBench(FlowSpec):
             self.cpu_staircase,
         )
 
-    @resources(cpu=1)
+    @resources(cpu=3)
     @step
-    def cpu_1cores(self):
+    def cpu_3cores(self):
         """
         One core, 100% utilized
         """
-        spin_cpu_percentage(self.spin_secs)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 3)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
@@ -99,13 +97,13 @@ class MonitorBench(FlowSpec):
         parallel_map(lambda _: spin_cpu_percentage(self.spin_secs), [None] * 2)
         self.next(self.cpu_join)
 
-    @resources(cpu=1)
+    @resources(cpu=3)
     @step
-    def cpu_1cores_halfload(self):
+    def cpu_3cores_halfload(self):
         """
         One core, 50% utilized
         """
-        spin_cpu_percentage(self.spin_secs, percentage=50)
+        parallel_map(lambda _: spin_cpu_percentage(self.spin_secs, percentage=50), [None] * 2)
         self.next(self.cpu_join)
 
     @resources(cpu=2)
@@ -161,6 +159,7 @@ class MonitorBench(FlowSpec):
         """
         Increase CPU utilization in steps of 10%, ending at 100% utilization
         """
+        print(f'Increasing CPU utilization over {self.spin_secs} seconds...')
         for i in range(10):
             spin_cpu_percentage(self.spin_secs / 10, i * 10)
         self.next(self.cpu_join)
@@ -262,11 +261,19 @@ class MonitorBench(FlowSpec):
         Cause an OOM and @catch it
         """
         if self.enable_oom:
-            print("allocating too much memory soon")
+            # Start by allocating a staircase of memory
+            t = []
+            for i in range(9):
+                t.append(b"a" * 512_000_000)
+                _print_mem()
+                time.sleep(self.spin_secs / 10)
+            # Sleep for a bit to allow other tasks to complete
+            time.sleep(self.spin_secs / 10)
+            print("allocating too much memory in 2 seconds...")
             time.sleep(2)
             c = load_libc()
-            p = c.malloc(4_000_000_000)
-            c.memset(p, 66, 4_000_000_000)
+            p = c.malloc(16_000_000_000)
+            c.memset(p, 66, 16_000_000_000)
             print("you shouldn't see this line!")
         else:
             print("oom test disabled")
@@ -339,8 +346,9 @@ class MonitorBench(FlowSpec):
         time.sleep(self.spin_secs / 2)
         x = b"1" * 1_000_000_000
         num_gigs = 8
-        with NamedTemporaryFile() as tmp:
+        with open('tmpfile.tmp', 'w+b') as tmp:
             _make_file(tmp.name, num_gigs * 1000)
+            tmp.flush()
         time.sleep(self.spin_secs / 2)
         self.next(self.io_join)
 
@@ -353,8 +361,9 @@ class MonitorBench(FlowSpec):
         x = b"1" * 1_000_000_000
         for _ in range(10):
             num_gigs = 8
-            with NamedTemporaryFile() as tmp:
+            with open('tmpfile.tmp', 'w+b') as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
+                tmp.flush()
             spin_cpu_percentage(self.spin_secs / 10)
         self.next(self.io_join)
 
