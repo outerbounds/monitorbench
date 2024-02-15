@@ -263,17 +263,17 @@ class MonitorBench(FlowSpec):
         if self.enable_oom:
             # Start by allocating a staircase of memory
             t = []
-            for i in range(9):
+            for i in range(16):
                 t.append(b"a" * 512_000_000)
                 _print_mem()
-                time.sleep(self.spin_secs / 10)
+                time.sleep(self.spin_secs / 32)
             # Sleep for a bit to allow other tasks to complete
             time.sleep(self.spin_secs / 10)
             print("allocating too much memory in 2 seconds...")
             time.sleep(2)
-            c = load_libc()
-            p = c.malloc(16_000_000_000)
-            c.memset(p, 66, 16_000_000_000)
+            for i in range(16):
+                t.append(b"a" * 512_000_000)
+                _print_mem()
             print("you shouldn't see this line!")
         else:
             print("oom test disabled")
@@ -343,9 +343,10 @@ class MonitorBench(FlowSpec):
         """
         Wait, write 8GB to a file, and wait
         """
+        num_gigs = 8
+        print(f"Writing {num_gigs} GB to disk...")
         time.sleep(self.spin_secs / 2)
         x = b"1" * 1_000_000_000
-        num_gigs = 8
         with open('tmpfile.tmp', 'w+b') as tmp:
             _make_file(tmp.name, num_gigs * 1000)
             tmp.flush()
@@ -361,6 +362,7 @@ class MonitorBench(FlowSpec):
         x = b"1" * 1_000_000_000
         for _ in range(10):
             num_gigs = 8
+            print(f"Writing {num_gigs} GB to disk...")
             with open('tmpfile.tmp', 'w+b') as tmp:
                 _make_file(tmp.name, num_gigs * 1000)
                 tmp.flush()
